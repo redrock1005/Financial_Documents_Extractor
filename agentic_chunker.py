@@ -1,3 +1,5 @@
+from transformers import AutoTokenizer, AutoModelForMaskedLM
+import torch
 from langchain_core.prompts import ChatPromptTemplate
 import uuid
 from langchain_openai import ChatOpenAI
@@ -11,21 +13,72 @@ from rich import print
 load_dotenv()
 
 class AgenticChunker:
-    def __init__(self, openai_api_key=None):
+    def __init__(self, model_path="/Users/jungseokoh/Desktop/Cursor_prac_2024/product_factory/KB-Albert"):
         self.chunks = {}
         self.id_truncate_limit = 5
-
-        # 새로운 정보를 얻을 때 요약 및 제목을 업데이트/수정할지 여부
         self.generate_new_metadata_ind = True
         self.print_logging = True
 
-        if openai_api_key is None:
-            openai_api_key = os.getenv("OPENAI_API_KEY")
+        # KB-Albert 모델과 토크나이저 로드
+        try:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.model = AutoModelForMaskedLM.from_pretrained(model_path)
+            self.model = self.model.to(self.device)
+            self.model.eval()
+        except Exception as e:
+            raise ValueError(f"KB-Albert 모델 로드 실패: {str(e)}")
 
-        if openai_api_key is None:
-            raise ValueError("API key is not provided and not found in environment variables")
+    def generate_embedding(self, text):
+        """텍스트에 대한 임베딩 생성"""
+        try:
+            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+            inputs = inputs.to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                # 마지막 은닉층의 출력을 평균하여 임베딩 생성
+                embeddings = outputs.last_hidden_state.mean(dim=1)
+            
+            return embeddings.cpu().numpy()
+        
+        except Exception as e:
+            print(f"임베딩 생성 중 오류 발생: {str(e)}")
+            return None
 
-        self.llm = ChatOpenAI(model='gpt-3.5-turbo', openai_api_key=openai_api_key, temperature=0)
+    def chunk_and_embed(self, text):
+        """텍스트를 청킹하고 각 청크에 대해 임베딩 생성"""
+        # 텍스트를 의미 단위로 분할 (예: 문장 단위)
+        chunks = self._split_text_into_chunks(text)
+        
+        # 각 청크에 대해 임베딩 생성
+        chunk_embeddings = {chunk: self.generate_embedding(chunk) for chunk in chunks}
+        
+        return chunk_embeddings
+
+    def _split_text_into_chunks(self, text):
+        """텍스트를 의미 단위로 분할하는 메서드"""
+        # 간단한 문장 분할 예시 (더 복잡한 로직으로 대체 가능)
+        return text.split('. ')
+
+    def generate_response(self, prompt):
+        """KB-Albert를 사용하여 응답 생성"""
+        try:
+            inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+            inputs = inputs.to(self.device)
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                predictions = outputs.logits
+            
+            predicted_token_ids = torch.argmax(predictions[0], dim=-1)
+            response = self.tokenizer.decode(predicted_token_ids, skip_special_tokens=True)
+            
+            return response.strip()
+        
+        except Exception as e:
+            print(f"응답 생성 중 오류 발생: {str(e)}")
+            return None
 
     def add_propositions(self, propositions):
         for proposition in propositions:
@@ -146,74 +199,16 @@ class AgenticChunker:
         return updated_chunk_title
 
     def _get_new_chunk_summary(self, proposition):
-        PROMPT = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    """
-                    You are the steward of a group of chunks which represent groups of sentences that talk about a similar topic
-                    You should generate a very brief 1-sentence summary which will inform viewers what a chunk group is about.
-
-                    A good summary will say what the chunk is about, and give any clarifying instructions on what to add to the chunk.
-
-                    You will be given a proposition which will go into a new chunk. This new chunk needs a summary.
-
-                    Your summaries should anticipate generalization. If you get a proposition about apples, generalize it to food.
-                    Or month, generalize it to "date and times".
-
-                    Example:
-                    Input: Proposition: Greg likes to eat pizza
-                    Output: This chunk contains information about the types of food Greg likes to eat.
-
-                    Only respond with the new chunk summary, nothing else.
-                    """,
-                ),
-                ("user", "Determine the summary of the new chunk that this proposition will go into:\\n{proposition}"),
-            ]
-        )
-
-        runnable = PROMPT | self.llm
-
-        new_chunk_summary = runnable.invoke({
-            "proposition": proposition
-        }).content
-
-        return new_chunk_summary
+        """새로운 청크 요약 생성"""
+        prompt = f"다음 문장을 요약하세요: {proposition}"
+        summary = self.generate_response(prompt)
+        return summary
     
-    def _get_new_chunk_title(self, summary):
-        PROMPT = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    """
-                    You are the steward of a group of chunks which represent groups of sentences that talk about a similar topic
-                    You should generate a very brief few word chunk title which will inform viewers what a chunk group is about.
-
-                    A good chunk title is brief but encompasses what the chunk is about
-
-                    You will be given a summary of a chunk which needs a title
-
-                    Your titles should anticipate generalization. If you get a proposition about apples, generalize it to food.
-                    Or month, generalize it to "date and times".
-
-                    Example:
-                    Input: Summary: This chunk is about dates and times that the author talks about
-                    Output: Date & Times
-
-                    Only respond with the new chunk title, nothing else.
-                    """,
-                ),
-                ("user", "Determine the title of the chunk that this summary belongs to:\\n{summary}"),
-            ]
-        )
-
-        runnable = PROMPT | self.llm
-
-        new_chunk_title = runnable.invoke({
-            "summary": summary
-        }).content
-
-        return new_chunk_title
+    def _get_new_chunk_title(self, new_chunk_summary):
+        """새로운 청크 제목 생성"""
+        prompt = f"다음 요약을 기반으로 제목을 생성하세요: {new_chunk_summary}"
+        title = self.generate_response(prompt)
+        return title
 
     def _create_new_chunk(self, proposition):
         new_chunk_id = str(uuid.uuid4())[:self.id_truncate_limit] # I don't want long ids
@@ -245,64 +240,30 @@ class AgenticChunker:
         return chunk_outline
 
     def _find_relevant_chunk(self, proposition):
+        """청크 관련성 판단"""
         current_chunk_outline = self.get_chunk_outline()
-
-        PROMPT = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    """
-                    Determine whether or not the "Proposition" should belong to any of the existing chunks.
-
-                    A proposition should belong to a chunk of their meaning, direction, or intention are similar.
-                    The goal is to group similar propositions and chunks.
-
-                    If you think a proposition should be joined with a chunk, return the chunk id.
-                    If you do not think an item should be joined with an existing chunk, just return "No chunks"
-
-                    Example:
-                    Input:
-                        - Proposition: "Greg really likes hamburgers"
-                        - Current Chunks:
-                            - Chunk ID: 2n4l3d
-                            - Chunk Name: Places in San Francisco
-                            - Chunk Summary: Overview of the things to do with San Francisco Places
-
-                            - Chunk ID: 93833k
-                            - Chunk Name: Food Greg likes
-                            - Chunk Summary: Lists of the food and dishes that Greg likes
-                    Output: 93833k
-                    """,
-                ),
-                ("user", "Current Chunks:\\n--Start of current chunks--\\n{current_chunk_outline}\\n--End of current chunks--"),
-                ("user", "Determine if the following statement should belong to one of the chunks outlined:\\n{proposition}"),
-            ]
-        )
-
-        runnable = PROMPT | self.llm
-
-        chunk_found = runnable.invoke({
-            "proposition": proposition,
-            "current_chunk_outline": current_chunk_outline
-        }).content
-
-        # Pydantic data class
-        class ChunkID(BaseModel):
-            """Extracting the chunk id"""
-            chunk_id: Optional[str]
-            
-        # 추출을 통해 모든 LLM 응답을 포착합니다. 이것은 임시방편입니다.
-        extraction_chain = create_extraction_chain_pydantic(pydantic_schema=ChunkID, llm=self.llm)
-        extraction_found = extraction_chain.invoke(chunk_found)["text"]
-        if extraction_found:
-            chunk_found = extraction_found[0].chunk_id
-
-        # 청크 ID 제한이 아닌 응답을 받은 경우 불량 응답이거나 아무것도 찾지 못했을 가능성이 있습니다.
-        # So return nothing
-        if len(chunk_found) != self.id_truncate_limit:
+        
+        prompt = f"""
+        다음 문장이 어느 청크에 속하는지 판단하세요:
+        현재 청크들: {current_chunk_outline}
+        
+        판단할 문장: {proposition}
+        
+        [MASK]
+        """
+        
+        response = self.generate_response(prompt)
+        if not response:
             return None
-
-        return chunk_found
+            
+        # 응답에서 청크 ID 추출
+        chunk_id = None
+        if len(response) >= self.id_truncate_limit:
+            potential_id = response[:self.id_truncate_limit]
+            if potential_id.isalnum():
+                chunk_id = potential_id
+        
+        return chunk_id
     
     def get_chunks(self, get_type='dict'):
         """

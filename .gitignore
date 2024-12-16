@@ -1,40 +1,51 @@
-# 모델 파일
-KB-Albert/
-
-# 청킹 결과
-chunks/
-
-# 로그 파일
-logs/
-
-# 파이썬 관련
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-*.egg-info/
-.installed.cfg
-*.egg
-
+# .gitignore
 # 가상환경
 venv/
-ENV/
+env/
+.venv/
+.env/
 
-# IDE 관련
+# 캐시 파일
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.cache
+
+# 모델 & 데이터
+KB-Albert/
+vector_store/
+cache/
+chunks/
+faiss_index/
+doc/
+logs/
+credentials/
+
+# 시스템 파일
+.DS_Store
+*.so
+*.dylib
+*.dll
+
+# IDE 설정
 .idea/
 .vscode/
-*.swp
-*.swo
+*.sublime-workspace
+*.sublime-project
+
+# 임시 파일
+*.log
+*.tmp
+*.temp
+*.workspace
+*.faiss
+*.pkl
+*.json
+*.index
+
+# 기타 모든 디렉토리와 파일 (*.py 제외)
+*
+!*.py
+!requirements.txt
+!.gitignore

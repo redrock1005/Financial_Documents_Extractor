@@ -43,9 +43,3 @@ credentials/
 *.pkl
 *.json
 *.index
-
-# 기타 모든 디렉토리와 파일 (*.py 제외)
-*
-!*.py
-!requirements.txt
-!.gitignore

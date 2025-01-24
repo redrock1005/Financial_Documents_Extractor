@@ -4,6 +4,7 @@ from openai import OpenAI
 import os
 from dotenv import load_dotenv
 import tiktoken
+import json
 
 class ChunkProcessor(BaseProcessor):
     def __init__(self, max_tokens: int = 512):
@@ -25,13 +26,14 @@ class ChunkProcessor(BaseProcessor):
         return len(self.gpt_tokenizer.encode(text))
 
     def _split_long_chunk(self, chunk: str) -> List[str]:
-        """긴 청크를 의미 단위로 분할"""
-        # 문장 단위로 분할
-        sentences = [s.strip() + '.' for s in chunk.split('.') if s.strip()]
+        """긴 청크를 토큰 제한에 맞게 분할"""
         sub_chunks = []
         current_chunk = ""
         current_tokens = 0
-
+        
+        # 1. 문장 단위로 1차 분할
+        sentences = [s.strip() + '.' for s in chunk.split('.') if s.strip()]
+        
         for sentence in sentences:
             sentence_tokens = self._get_token_length(sentence)
             
@@ -42,24 +44,43 @@ class ChunkProcessor(BaseProcessor):
                     current_chunk = ""
                     current_tokens = 0
                 
-                # 문장을 더 작은 단위(구두점 기준)로 분할
-                sub_sentences = [s.strip() + ',' for s in sentence.split(',') if s.strip()]
-                temp_chunk = ""
-                temp_tokens = 0
+                # 문장을 더 작은 단위로 분할 (구두점, 접속사 등 기준)
+                delimiters = [',', '그리고', '또한', '하지만', '따라서', '그러나']
+                temp_parts = [sentence]
                 
-                for sub_sent in sub_sentences:
-                    sub_tokens = self._get_token_length(sub_sent)
-                    if temp_tokens + sub_tokens <= self.max_tokens:
-                        temp_chunk += sub_sent + " "
-                        temp_tokens += sub_tokens
-                    else:
+                for delimiter in delimiters:
+                    new_parts = []
+                    for part in temp_parts:
+                        if self._get_token_length(part) > self.max_tokens:
+                            split_parts = [p.strip() for p in part.split(delimiter) if p.strip()]
+                            new_parts.extend(split_parts)
+                        else:
+                            new_parts.append(part)
+                    temp_parts = new_parts
+                
+                # 여전히 긴 부분이 있다면 강제 분할
+                for part in temp_parts:
+                    part_tokens = self._get_token_length(part)
+                    if part_tokens > self.max_tokens:
+                        words = part.split()
+                        temp_chunk = ""
+                        temp_tokens = 0
+                        
+                        for word in words:
+                            word_tokens = self._get_token_length(word)
+                            if temp_tokens + word_tokens <= self.max_tokens:
+                                temp_chunk += word + " "
+                                temp_tokens += word_tokens
+                            else:
+                                if temp_chunk:
+                                    sub_chunks.append(temp_chunk.strip())
+                                temp_chunk = word + " "
+                                temp_tokens = word_tokens
+                        
                         if temp_chunk:
                             sub_chunks.append(temp_chunk.strip())
-                        temp_chunk = sub_sent + " "
-                        temp_tokens = sub_tokens
-                
-                if temp_chunk:
-                    sub_chunks.append(temp_chunk.strip())
+                    else:
+                        sub_chunks.append(part)
                     
             # 현재 청크에 문장을 추가할 수 있는 경우
             elif current_tokens + sentence_tokens <= self.max_tokens:
@@ -76,7 +97,7 @@ class ChunkProcessor(BaseProcessor):
         # 마지막 청크 처리
         if current_chunk:
             sub_chunks.append(current_chunk.strip())
-            
+        
         return sub_chunks
 
     def _create_semantic_chunks(self, text: str) -> List[str]:
@@ -121,50 +142,43 @@ class ChunkProcessor(BaseProcessor):
             # 오류 발생 시 단순 문장 분할로 폴백
             return [s.strip() + '.' for s in text.split('.') if s.strip()]
 
-    def process(self, text: str) -> Dict[str, Any]:
+    def process(self, text: str, file_name: str) -> Dict[str, Any]:
         """텍스트를 의미 단위로 청킹"""
-        if not text.strip():
-            return {"chunks": [], "metadata": {"num_chunks": 0}}
-
-        print("\n=== 청킹 프로세스 시작 ===")
-        
-        # 1. GPT를 사용하여 의미 단위로 청킹
-        print("1. GPT 의미 단위 분할 시작")
-        initial_chunks = self._create_semantic_chunks(text)
-        print(f"   의미 단위 분할 완료: {len(initial_chunks)}개의 청크 생성")
-        
-        # 2. 토큰 수 확인 및 필요시 재분할
-        print("\n2. 토큰 수 검증 및 재분할 시작")
-        final_chunks = []
-        for i, chunk in enumerate(initial_chunks, 1):
-            chunk_tokens = self._get_token_length(chunk)
-            print(f"   청크 {i}/{len(initial_chunks)} 검사 중 (토큰 수: {chunk_tokens})")
+        try:
+            # 1. 의미 단위로 청크 생성
+            semantic_chunks = self._create_semantic_chunks(text)
             
-            if chunk_tokens <= self.max_tokens:
-                final_chunks.append(chunk)
-            else:
-                print(f"   청크 {i} 재분할 필요 (토큰 수: {chunk_tokens} > {self.max_tokens})")
-                sub_chunks = self._split_long_chunk(chunk)
-                print(f"   재분할 결과: {len(sub_chunks)}개의 서브 청크 생성")
-                final_chunks.extend(sub_chunks)
-        
-        # 3. 최종 검증
-        print(f"\n3. 최종 검증")
-        validated_chunks = []
-        for i, chunk in enumerate(final_chunks, 1):
-            tokens = self._get_token_length(chunk)
-            if tokens <= self.max_tokens:
-                validated_chunks.append(chunk)
-            else:
-                print(f"   경고: 청크 {i}가 여전히 토큰 제한 초과 ({tokens} > {self.max_tokens})")
-                sub_chunks = self._split_long_chunk(chunk)
-                validated_chunks.extend(sub_chunks)
-        
-        print(f"\n=== 청킹 완료 ===")
-        print(f"최종 청크 수: {len(validated_chunks)}")
-        
-        return {
-            "chunks": [{"text": chunk, "tokens": self._get_token_length(chunk)} 
-                      for chunk in validated_chunks],
-            "metadata": {"num_chunks": len(validated_chunks)}
-        }
+            # 2. 토큰 제한을 초과하는 청크 재분할
+            final_chunks = []
+            for chunk in semantic_chunks:
+                if self._get_token_length(chunk) > self.max_tokens:
+                    # 토큰 제한 초과 시 더 작은 단위로 분할
+                    sub_chunks = self._split_long_chunk(chunk)
+                    final_chunks.extend(sub_chunks)
+                else:
+                    final_chunks.append(chunk)
+            
+            # 3. 결과 구조화
+            result = {
+                "chunks": [
+                    {
+                        "text": chunk,
+                        "tokens": self._get_token_length(chunk)
+                    } for chunk in final_chunks
+                ],
+                "metadata": {
+                    "num_chunks": len(final_chunks),
+                    "max_tokens": self.max_tokens
+                }
+            }
+            
+            # 4. 결과 저장
+            chunks_path = os.path.join(self.chunks_dir, f"{file_name}.json")
+            with open(chunks_path, 'w', encoding='utf-8') as f:
+                json.dump(result, f, ensure_ascii=False, indent=2)
+            
+            return result
+
+        except Exception as e:
+            print(f"청킹 중 오류 발생: {e}")
+            raise

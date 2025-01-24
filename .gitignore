@@ -42,4 +42,6 @@ credentials/
 *.faiss
 *.pkl
 *.json
-*.index
+*.index.env
+.env
+.env

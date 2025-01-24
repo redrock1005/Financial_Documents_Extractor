@@ -45,3 +45,4 @@ credentials/
 *.index.env
 .env
 .env
+.env
